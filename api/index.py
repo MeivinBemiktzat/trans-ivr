@@ -46,8 +46,16 @@ api_add_1=tts_path=ivr2:/4/M9
 # --- (רשות) שלוחת יעד לניתוב אחרי סיום התמלול, ברירת מחדל: המשך לקובץ הבא ---
 api_add_2=next_folder=/4
 
+# --- (רשות) תיקיית יעד נפרדת לקובצי ה-TTS, אם רוצים להפריד אותם
+#     מתיקיית ההקלטות. אם לא מוגדר - ה-TTS יישמר באותה שלוחה שבה
+#     מתבצעת ההקלטה (ApiExtension), בדיוק כמו קודם. ---
+api_add_3=tts_folder=ivr2:/4/M9
+
 # הערה: קובץ ההקלטה וקובץ ה-TTS נקבעים אוטומטית (000, 001, 002...) -
-# אין צורך יותר להגדיר record_file או tts_path.
+# אין צורך יותר להגדיר record_file. המספור תמיד נקבע לפי ההקלטות
+# (בשלוחת ApiExtension), אבל אם tts_folder מוגדר, קובץ ה-TTS עצמו
+# נכתב לשם תחת אותו מספר - כדי לשמור על ההתאמה בין 000.wav ל-000.tts
+# גם כששתיהן בתיקיות שונות.
 
 לפרטים מלאים ראו README.md שבחבילה זו.
 
@@ -338,6 +346,9 @@ class handler(BaseHTTPRequestHandler):
         # קובע אותם אוטומטית (000, 001, 002...) לפי ההקלטה/תמלול הבא הפנוי.
         token = params.get('token', '')
         next_folder = params.get('next_folder') or None
+        # tts_folder הוא רשות: אם לא מוגדר, ה-TTS נכתב לאותה תיקייה
+        # שבה נשמרת ההקלטה (folder_ivr_path) - בדיוק כמו קודם.
+        tts_folder_raw = params.get('tts_folder') or None
 
         if not token:
             raise YemotApiError(
@@ -346,7 +357,14 @@ class handler(BaseHTTPRequestHandler):
 
         extension = params.get('ApiExtension', '') or params.get('Extension', '')
         ext = extension if extension.startswith('/') else '/' + extension
+        # תיקיית ההקלטות תמיד נגזרת מ-ApiExtension - זו התיקייה שבה
+        # ימות בפועל שומר את הקלטת המאזין, ואת זה אי אפשר לשנות.
         folder_ivr_path = normalize_ivr_path(ext)
+        # תיקיית ה-TTS: אם tts_folder הוגדר - משתמשים בה; אחרת אותה
+        # תיקייה כמו ההקלטות (folder_ivr_path).
+        tts_folder_ivr_path = (
+            normalize_ivr_path(tts_folder_raw) if tts_folder_raw else folder_ivr_path
+        )
 
         # --- שלב 1: אין עדיין הקלטה -> מבקשים מהמאזין להקליט ---
         # מזהים "אין הקלטה" לפי מספר הפנייה (val_1 ריק/לא קיים, כפי שמתועד
@@ -361,6 +379,8 @@ class handler(BaseHTTPRequestHandler):
         # --- שלב 2: ההקלטה כבר קיימת בשלוחה -> מורידים, מתמללים, כותבים TTS ---
         # מוצאים שוב את המספר האחרון שנוצר (ההקלטה שזה עתה הושלמה) -
         # זהו המספר הפנוי-לשעבר, כלומר אחד פחות מהמספר הפנוי הנוכחי.
+        # המספור תמיד נקבע לפי ההקלטות בתיקיית folder_ivr_path (שלוחת
+        # ApiExtension) - גם אם ה-TTS בסוף נכתב לתיקייה אחרת.
         next_free = find_next_free_number(token, folder_ivr_path)
         last_number = f'{int(next_free) - 1:03d}'
 
@@ -371,7 +391,10 @@ class handler(BaseHTTPRequestHandler):
         if not text:
             text = ''  # קובץ TTS ריק - עדיף מאשר לא לכתוב כלום, כדי לאפס תוצאה קודמת
 
-        tts_path = f'{folder_ivr_path}/{last_number}'
+        # קובץ ה-TTS נכתב לתיקיית ה-TTS (tts_folder אם הוגדר, אחרת אותה
+        # תיקייה כמו ההקלטה) תחת אותו מספר תלת-ספרתי כמו ההקלטה, כדי
+        # לשמור על ההתאמה בין 000.wav ל-000.tts גם כששתיהן בתיקיות שונות.
+        tts_path = f'{tts_folder_ivr_path}/{last_number}'
         upload_tts_text(token, tts_path, text)
 
         return response_route_next(next_folder)
