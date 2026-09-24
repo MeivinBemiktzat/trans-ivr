@@ -331,7 +331,8 @@ class handler(BaseHTTPRequestHandler):
                 params = parse_yemot_payload(raw_body, self.headers.get('Content-Type', ''))
 
             reply = self._route(params)
-            self._send_text(200, reply)
+            if reply is not None:
+                self._send_text(200, reply)
 
         except YemotApiError as exc:
             self._send_text(200, response_error('אירעה תקלה בשמירת התמלול, נסו שוב מאוחר יותר'))
@@ -341,6 +342,16 @@ class handler(BaseHTTPRequestHandler):
             self._log_error(exc)
 
     def _route(self, params: dict) -> str:
+        # --- בקשת "ניתוק שיחה" ---
+        # ימות שולח, בנפרד מסבבי השיחה הרגילים, קריאה עם hangup=yes
+        # (ולעיתים ApiHangupExtension) כדי ליידע שהשיחה הסתיימה. זו לא
+        # עוד סבב בשיחה חיה - אין להחזיר תגובת ניתוב/הקלטה. ראה דוגמת
+        # קוד אמיתית מהקהילה (f2-1360) שעושה בדיוק את זה כשורה ראשונה
+        # בטיפול בבקשה: if ($_GET['hangup'] == "yes"){exit();}
+        if params.get('hangup') == 'yes':
+            self._send_text(200, '')
+            return None
+
         # --- קריאת ה-token וההגדרות הקבועות שהוגדרו ב-ext.ini של השלוחה ---
         # שימו לב: record_file ו-tts_path כבר לא נדרשים כהגדרה - המודול
         # קובע אותם אוטומטית (000, 001, 002...) לפי ההקלטה/תמלול הבא הפנוי.
