@@ -43,11 +43,11 @@ api_add_0=token=0700000000:MyPassword123
 # --- נתיב שמירת קובץ ה-TTS עם התוצאה (ללא סיומת - המודול יוסיף .tts) ---
 api_add_1=tts_path=ivr2:/4/M9
 
-# --- (רשות) שם קובץ ה-wav שההקלטה תישמר בו בתוך אותה שלוחה, ברירת מחדל 000 ---
-api_add_2=record_file=000
-
 # --- (רשות) שלוחת יעד לניתוב אחרי סיום התמלול, ברירת מחדל: המשך לקובץ הבא ---
-api_add_3=next_folder=/4
+api_add_2=next_folder=/4
+
+# הערה: קובץ ההקלטה וקובץ ה-TTS נקבעים אוטומטית (000, 001, 002...) -
+# אין צורך יותר להגדיר record_file או tts_path.
 
 לפרטים מלאים ראו README.md שבחבילה זו.
 
@@ -85,7 +85,6 @@ TRANSCRIBE_LANGUAGE = 'he-IL'          # שפת התמלול. אפשר לשנו�
 SILENCE_PADDING_MS = 500               # ריפוד שקט לפני/אחרי ההקלטה (מ"ש)
 
 YEMOT_API_BASE = 'https://www.call2all.co.il/ym/api/'
-DEFAULT_RECORD_FILE = '000'            # שם קובץ ההקלטה שימות שומר בשלוחה
 DEFAULT_NEXT_ACTION = None             # None => הודעת סיום פשוטה + ניתוק
 
 
@@ -163,6 +162,30 @@ def normalize_ivr_path(path: str) -> str:
     if not path.startswith('/'):
         path = '/' + path
     return 'ivr2:' + path
+
+
+def check_file_exists(token: str, ivr_path: str) -> bool:
+    """בודק אם קובץ קיים בנתיב הנתון, בעזרת פקודת CheckIfFileExists."""
+    data = _yemot_get('CheckIfFileExists', {'token': token, 'path': normalize_ivr_path(ivr_path)})
+    if data.get('responseStatus') not in ('OK', None):
+        raise YemotApiError(f'בדיקת קיום קובץ נכשלה: {data}')
+    return bool(data.get('fileExists'))
+
+
+def find_next_free_number(token: str, folder_ivr_path: str) -> str:
+    """
+    מוצא את המספר התלת-ספרתי הפנוי הבא (000, 001, 002...) בתיקייה נתונה,
+    כך שכל הקלטה/תמלול חדשים מקבלים קובץ משלהם בלי דריסת קודמיו.
+    בודק לפי קיום קובץ ה-wav (ההקלטה) בתיקייה, כדי לשמור על זוגיות
+    בין מספר ההקלטה למספר קובץ ה-TTS התואם לו.
+    """
+    n = 0
+    while True:
+        candidate = f'{n:03d}'
+        wav_path = f'{folder_ivr_path}/{candidate}.wav'
+        if not check_file_exists(token, wav_path):
+            return candidate
+        n += 1
 
 
 def download_recording(token: str, ivr_path: str) -> bytes:
@@ -262,6 +285,8 @@ def response_ask_for_recording(record_file: str) -> str:
     """
     מבקש מהמאזין להקליט לתוך קובץ record_file (בשלוחה הנוכחית).
     תחביר read עם סוג record, לפי api-and-integrations.md.
+    record_file הוא כעת המספר התלת-ספרתי הפנוי הבא (000, 001, 002...),
+    כדי שכל הקלטה תישמר בקובץ נפרד משלה ולא תדרוס הקלטה קודמת.
     """
     return f'read=record-{record_file}=recording'
 
@@ -309,17 +334,19 @@ class handler(BaseHTTPRequestHandler):
 
     def _route(self, params: dict) -> str:
         # --- קריאת ה-token וההגדרות הקבועות שהוגדרו ב-ext.ini של השלוחה ---
+        # שימו לב: record_file ו-tts_path כבר לא נדרשים כהגדרה - המודול
+        # קובע אותם אוטומטית (000, 001, 002...) לפי ההקלטה/תמלול הבא הפנוי.
         token = params.get('token', '')
-        tts_path = params.get('tts_path', '')
-        record_file = params.get('record_file') or DEFAULT_RECORD_FILE
         next_folder = params.get('next_folder') or None
 
-        if not token or not tts_path:
+        if not token:
             raise YemotApiError(
-                'חסרות הגדרות חובה בשלוחה: יש להגדיר api_add לפרמטרים token ו-tts_path'
+                'חסרה הגדרת חובה בשלוחה: יש להגדיר api_add לפרמטר token'
             )
 
         extension = params.get('ApiExtension', '') or params.get('Extension', '')
+        ext = extension if extension.startswith('/') else '/' + extension
+        folder_ivr_path = normalize_ivr_path(ext)
 
         # --- שלב 1: אין עדיין הקלטה -> מבקשים מהמאזין להקליט ---
         # מזהים "אין הקלטה" לפי מספר הפנייה (val_1 ריק/לא קיים, כפי שמתועד
@@ -327,16 +354,24 @@ class handler(BaseHTTPRequestHandler):
         has_recording_answer = any(k.startswith('val_') for k in params)
 
         if not has_recording_answer:
-            return response_ask_for_recording(record_file)
+            # מוצאים את המספר הפנוי הבא (000, 001, 002...) לפי קבצים קיימים בשלוחה
+            next_number = find_next_free_number(token, folder_ivr_path)
+            return response_ask_for_recording(next_number)
 
         # --- שלב 2: ההקלטה כבר קיימת בשלוחה -> מורידים, מתמללים, כותבים TTS ---
-        recording_path = build_recording_path(extension, record_file)
+        # מוצאים שוב את המספר האחרון שנוצר (ההקלטה שזה עתה הושלמה) -
+        # זהו המספר הפנוי-לשעבר, כלומר אחד פחות מהמספר הפנוי הנוכחי.
+        next_free = find_next_free_number(token, folder_ivr_path)
+        last_number = f'{int(next_free) - 1:03d}'
+
+        recording_path = build_recording_path(extension, last_number)
         wav_bytes = download_recording(token, recording_path)
         text = transcribe_wav_bytes(wav_bytes)
 
         if not text:
             text = ''  # קובץ TTS ריק - עדיף מאשר לא לכתוב כלום, כדי לאפס תוצאה קודמת
 
+        tts_path = f'{folder_ivr_path}/{last_number}'
         upload_tts_text(token, tts_path, text)
 
         return response_route_next(next_folder)
